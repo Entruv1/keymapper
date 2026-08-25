@@ -1,0 +1,56 @@
+# 按键映射助手 KeyMapper
+
+[![Build & Release](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/actions/workflows/build.yml/badge.svg)](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/actions/workflows/build.yml)
+
+一个简单易用的 Windows 键盘改键工具：把任意按键映射为其他按键、系统功能、**打开网页**或**启动程序**，支持按键测试、开机自启、系统托盘后台运行。纯 C# WinForms 编写，单文件源码，无需安装任何依赖（Win7+ 自带 .NET Framework）。
+
+> 将上方徽章链接中的 `YOUR_GITHUB_USERNAME` 替换为你的 GitHub 用户名。
+
+## ✨ 功能
+
+- **四种映射动作**：
+  1. **映射为按键 / 功能** —— 136 种目标：音量控制、媒体键、浏览器键、应用键、F1-F24、方向键、小键盘、字母、数字、符号等
+  2. **打开网页** —— 按下按键用默认浏览器打开指定网址（自动补全 `https://`）
+  3. **启动程序** —— 按下按键启动指定 exe / 快捷方式 / 批处理（带文件选择器）
+  4. **屏蔽此键** —— 按下无任何反应（防误触）
+- **按键测试**：屏幕模拟键盘实时高亮按下的键，显示键名和虚拟键码
+- **注入自检**：一键检测映射是否被系统接收（含音量变化检测），方便排查问题
+- **编辑 / 删除**：已设置的映射可随时修改（双击列表即可编辑）
+- **开机自启**：自动复制到稳定目录并写入注册表，开机静默后台运行
+- **系统托盘**：最小化缩到托盘；右键快速启停映射、以管理员身份重启、退出
+- **关闭行为**：点"×"可选最小化到托盘 / 退出 / 取消（可记住选择）
+
+## 🚀 快速开始
+
+1. 从 [Releases](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/releases) 下载最新版 `KeyMapper-vX.X.zip`
+2. 解压后双击 `KeyMapper.exe`
+3. 【＋添加映射】→ 按下要改的键 → 选择动作类型 → 确定
+4. 勾选【开机自动启动】后开机自动运行
+
+## 🛠 从源码构建
+
+- 本地：双击 `build.bat`（需要 .NET Framework，Win7+ 自带）
+- CI：GitHub Actions 已配置自动构建，见 `.github/workflows/build.yml`
+
+## 📁 项目结构
+
+```
+KeyMapper.cs        单文件源码（约 2100 行，含全部功能）
+build.bat           本地一键编译脚本
+keyboard.ico        程序图标（多尺寸）
+使用说明.md         详细中文说明
+.github/workflows/build.yml   GitHub Actions 自动构建/发布
+```
+
+## ⚠️ 注意事项
+
+- 无需管理员权限；若目标程序以管理员身份运行导致映射无效，用托盘菜单"以管理员身份重启"
+- 个别杀毒软件可能对键盘钩子误报，添加信任即可
+- 锁屏状态下 Windows 禁止输入注入，映射不生效属正常现象
+- 仅支持"单键 → 动作"映射，不支持组合键
+
+## 📄 更新记录
+
+- **v2.2**：新增"打开网页""启动程序"动作；界面优化；兼容旧配置
+- **v2.1**：新增编辑映射、关闭行为选择；修复按钮布局
+- **v2.0**：修复 SendInput 结构体错误（映射不生效根因）；支持全部按键；新增自检

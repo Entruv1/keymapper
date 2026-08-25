@@ -1,0 +1,13 @@
+# 编译产物（由 GitHub Actions / build.bat 生成）
+KeyMapper.exe
+*.zip
+
+# 系统 / 编辑器临时文件
+Thumbs.db
+Desktop.ini
+.vs/
+*.user
+*.suo
+
+# 本地配置
+*.local
