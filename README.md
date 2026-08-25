@@ -1,10 +1,10 @@
 # 按键映射助手 KeyMapper
 
-[![Build & Release](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/actions/workflows/build.yml/badge.svg)](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/actions/workflows/build.yml)
+[![Build & Release](https://github.com/Entruv1/KeyMapper/actions/workflows/build.yml/badge.svg)](https://github.com/Entruv1/KeyMapper/actions/workflows/build.yml)
 
 一个简单易用的 Windows 键盘改键工具：把任意按键映射为其他按键、系统功能、**打开网页**或**启动程序**，支持按键测试、开机自启、系统托盘后台运行。纯 C# WinForms 编写，单文件源码，无需安装任何依赖（Win7+ 自带 .NET Framework）。
 
-> 将上方徽章链接中的 `YOUR_GITHUB_USERNAME` 替换为你的 GitHub 用户名。
+> 将上方徽章链接中的 `Entruv1` 替换为你的 GitHub 用户名。
 
 ## ✨ 功能
 
@@ -22,7 +22,7 @@
 
 ## 🚀 快速开始
 
-1. 从 [Releases](https://github.com/YOUR_GITHUB_USERNAME/KeyMapper/releases) 下载最新版 `KeyMapper-vX.X.zip`
+1. 从 [Releases](https://github.com/Entruv1/KeyMapper/releases) 下载最新版 `KeyMapper-vX.X.zip`
 2. 解压后双击 `KeyMapper.exe`
 3. 【＋添加映射】→ 按下要改的键 → 选择动作类型 → 确定
 4. 勾选【开机自动启动】后开机自动运行
