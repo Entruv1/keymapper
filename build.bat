@@ -1,8 +1,8 @@
 @echo off
 rem ============================================
-rem  按键映射助手 KeyMapper - 一键编译脚本
-rem  双击本文件即可编译生成 KeyMapper.exe
-rem  需要系统已安装 .NET Framework（Win7+ 自带）
+rem   KeyMapper one-click build script
+rem   Double-click to build KeyMapper.exe
+rem   Requires .NET Framework (built into Win7+)
 rem ============================================
 setlocal
 set CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
@@ -12,9 +12,9 @@ if not exist "%CSC%" set CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 
 if errorlevel 1 (
     echo.
-    echo 编译失败，请检查上方错误信息。
+    echo [ERROR] Build failed, see messages above.
 ) else (
     echo.
-    echo 编译成功：KeyMapper.exe
+    echo [OK] KeyMapper.exe generated.
 )
 pause
