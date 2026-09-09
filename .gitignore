@@ -11,3 +11,7 @@ Desktop.ini
 
 # 本地配置
 *.local
+
+# 发布产物与本地工作数据
+publish/
+.workbuddy/
