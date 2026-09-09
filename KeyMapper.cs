@@ -115,6 +115,59 @@ namespace KeyMapper
 
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
+
+        /* ---------- 鼠标钩子（任务栏滚轮音量） ---------- */
+
+        public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        public const int WH_MOUSE_LL = 14;
+        public const int WM_MOUSEWHEEL = 0x020A;
+        public const int WM_MBUTTONDOWN = 0x0207;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     }
 
     /* ==================== 键名显示 ==================== */
@@ -630,6 +683,456 @@ namespace KeyMapper
                 arr2[0] = input2;
                 Native.SendInput(1, arr2, Marshal.SizeOf(typeof(Native.INPUT)));
             }
+        }
+    }
+
+    /* ==================== 系统音量（COM 封装） ==================== */
+    internal static class AudioVolume
+    {
+        [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+        private class MMDeviceEnumeratorComObject { }
+
+        [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDeviceEnumerator
+        {
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr ppDevice);
+            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr ppDevice);
+        }
+
+        [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDevice
+        {
+            [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
+        }
+
+        [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IAudioEndpointVolume
+        {
+            [PreserveSig] int RegisterControlChangeNotify(IntPtr pNotify);
+            [PreserveSig] int UnregisterControlChangeNotify(IntPtr pNotify);
+            [PreserveSig] int GetChannelCount(out uint pnChannelCount);
+            [PreserveSig] int SetMasterVolumeLevel(float fLevelDB, ref Guid pguidEventContext);
+            [PreserveSig] int SetMasterVolumeLevelScalar(float fLevel, ref Guid pguidEventContext);
+            [PreserveSig] int GetMasterVolumeLevel(out float pfLevelDB);
+            [PreserveSig] int GetMasterVolumeLevelScalar(out float pfLevel);
+            [PreserveSig] int SetChannelVolumeLevel(uint nChannel, float fLevelDB, ref Guid pguidEventContext);
+            [PreserveSig] int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, ref Guid pguidEventContext);
+            [PreserveSig] int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+            [PreserveSig] int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+            [PreserveSig] int SetMute(bool bMute, ref Guid pguidEventContext);
+            [PreserveSig] int GetMute(out bool pbMute);
+            [PreserveSig] int GetVolumeStepInfo(out uint pnStep, out uint pnStepCount);
+            [PreserveSig] int VolumeStepUp(ref Guid pguidEventContext);
+            [PreserveSig] int VolumeStepDown(ref Guid pguidEventContext);
+            [PreserveSig] int QueryHardwareSupport(out uint pdwHardwareSupportMask);
+            [PreserveSig] int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
+        }
+
+        private static IAudioEndpointVolume _endpoint;
+        private static readonly object _lock = new object();
+
+        /* 获取主音频端点（首次创建后缓存，避免每次调用都做 COM 构造） */
+        private static IAudioEndpointVolume GetEndpoint()
+        {
+            lock (_lock)
+            {
+                if (_endpoint != null) return _endpoint;
+                try
+                {
+                    IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                    IntPtr dev;
+                    if (e.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return null;
+                    Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+                    IntPtr pv;
+                    IMMDevice d = (IMMDevice)Marshal.GetObjectForIUnknown(dev);
+                    if (d.Activate(ref iid, 1, IntPtr.Zero, out pv) != 0) return null;
+                    _endpoint = (IAudioEndpointVolume)Marshal.GetObjectForIUnknown(pv);
+                    return _endpoint;
+                }
+                catch { return null; }
+            }
+        }
+
+        /* 0.0 ~ 1.0，失败返回 -1 */
+        public static float GetScalar()
+        {
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return -1f;
+            float f = -1f;
+            try { v.GetMasterVolumeLevelScalar(out f); } catch { }
+            return f;
+        }
+
+        /* 0.0 ~ 1.0 */
+        public static bool SetScalar(float s)
+        {
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return false;
+            if (s < 0f) s = 0f;
+            if (s > 1f) s = 1f;
+            try
+            {
+                Guid g = Guid.Empty;
+                v.SetMasterVolumeLevelScalar(s, ref g);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool IsMuted()
+        {
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return false;
+            bool m = false;
+            try { v.GetMute(out m); } catch { }
+            return m;
+        }
+
+        public static bool SetMute(bool mute)
+        {
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return false;
+            try
+            {
+                Guid g = Guid.Empty;
+                v.SetMute(mute, ref g);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static void ToggleMute()
+        {
+            SetMute(!IsMuted());
+        }
+
+        /* 在当前基础上增加 deltaPercent 个百分点（可负），自动取消静音。返回调整后的标量值，失败返回 -1 */
+        public static float ChangeBy(int deltaPercent)
+        {
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return -1f;
+            try
+            {
+                float cur;
+                v.GetMasterVolumeLevelScalar(out cur);
+                if (deltaPercent > 0 && IsMuted())
+                {
+                    Guid g = Guid.Empty;
+                    v.SetMute(false, ref g);
+                }
+                float next = cur + deltaPercent / 100f;
+                if (next < 0f) next = 0f;
+                if (next > 1f) next = 1f;
+                Guid g2 = Guid.Empty;
+                v.SetMasterVolumeLevelScalar(next, ref g2);
+                return next;
+            }
+            catch { return -1f; }
+        }
+    /* ==================== 音量 OSD 浮窗（自绘，覆盖任意幅度） ==================== */
+    internal class OsdOverlay : Form
+    {
+        private static OsdOverlay _inst;
+        private static System.Windows.Forms.Timer _hideTimer;
+
+        private readonly Label _lblTitle;
+        private readonly Label _lblPct;
+        private readonly ProgressBar _pb;
+
+        public static void Show(int percent, bool muted)
+        {
+            if (_inst == null || _inst.IsDisposed) _inst = new OsdOverlay();
+            if (_inst == null || _inst.IsDisposed) return;
+            if (_inst.Owner == null)
+            {
+                Form owner = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
+                if (owner != null && owner != _inst) _inst.Owner = owner;
+            }
+            _inst.UpdateInfo(percent, muted);
+            if (!_inst.Visible) _inst.Show();
+            if (_hideTimer == null)
+            {
+                _hideTimer = new System.Windows.Forms.Timer();
+                _hideTimer.Tick += delegate
+                {
+                    _hideTimer.Stop();
+                    if (_inst != null && !_inst.IsDisposed) _inst.Hide();
+                };
+            }
+            _hideTimer.Stop();
+            _hideTimer.Interval = 1500;
+            _hideTimer.Start();
+        }
+
+        public static void HideNow()
+        {
+            if (_hideTimer != null) _hideTimer.Stop();
+            if (_inst != null && !_inst.IsDisposed) _inst.Hide();
+        }
+
+        private OsdOverlay()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Color.Black;
+            Opacity = 0.8;
+            Size = new Size(220, 90);
+            StartPosition = FormStartPosition.Manual;
+            Padding = new Padding(0);
+
+            _lblTitle = new Label
+            {
+                Text = "系统音量",
+                Font = new Font("Microsoft YaHei UI", 10F),
+                ForeColor = Color.LightGray,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Dock = DockStyle.Top,
+                Height = 24,
+                Padding = new Padding(12, 5, 0, 0)
+            };
+            _lblPct = new Label
+            {
+                Text = "0%",
+                Font = new Font("Microsoft YaHei UI", 22F, FontStyle.Bold),
+                ForeColor = Color.White,
+                TextAlign = ContentAlignment.MiddleRight,
+                Dock = DockStyle.Top,
+                Height = 42,
+                Padding = new Padding(0, 0, 14, 0)
+            };
+            _pb = new ProgressBar
+            {
+                Dock = DockStyle.Bottom,
+                Height = 14,
+                Style = ProgressBarStyle.Continuous,
+                Minimum = 0,
+                Maximum = 100,
+                Margin = new Padding(0)
+            };
+
+            Controls.Add(_pb);
+            Controls.Add(_lblPct);
+            Controls.Add(_lblTitle);
+            Reposition();
+        }
+
+        private void UpdateInfo(int percent, bool muted)
+        {
+            if (percent < 0) percent = 0;
+            if (percent > 100) percent = 100;
+            _lblPct.Text = muted ? "静音" : percent + "%";
+            _lblTitle.Text = muted ? "系统音量（已静音）" : "系统音量";
+            _pb.Value = muted ? 0 : percent;
+            Reposition();
+        }
+
+        private void Reposition()
+        {
+            Rectangle wa = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(wa.Right - Width - 30, wa.Bottom - Height - 30);
+        }
+    }
+
+    /* ==================== 任务栏滚轮音量控制 ==================== */
+    public class TaskbarVolumeFeature : IDisposable
+    {
+        private const int CacheRectsMs = 300;
+
+        private Native.LowLevelMouseProc _proc;
+        private IntPtr _hookId = IntPtr.Zero;
+        private readonly object _sync = new object();
+        private readonly List<Native.RECT> _trayRects = new List<Native.RECT>();
+        private uint _rectStamp;
+        private readonly Native.EnumWindowsProc _enumProc;   // 必须持引用，避免被 GC
+
+        public bool Enabled = false;
+        public int StepPercent = 2;            // 单次滚动调整的百分比，1~20
+        public bool MiddleMuteEnabled = true;  // 中键切换静音
+
+        public event Action<int, bool> OnVolumeChanged;   // (音量%, 是否静音) 调整后触发
+
+        public TaskbarVolumeFeature()
+        {
+            _enumProc = EnumWindowsCallback;
+        }
+
+        public void Install()
+        {
+            if (_hookId != IntPtr.Zero) return;
+            _proc = HookCallback;
+            using (Process cur = Process.GetCurrentProcess())
+            {
+                if (cur.MainModule != null)
+                {
+                    _hookId = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _proc,
+                        Native.GetModuleHandle(cur.MainModule.ModuleName), 0);
+                }
+                else
+                {
+                    _hookId = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _proc, IntPtr.Zero, 0);
+                }
+            }
+            if (_hookId == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                throw new Exception("安装鼠标钩子失败：" + new Win32Exception(err).Message);
+            }
+        }
+
+        public void Uninstall()
+        {
+            if (_hookId != IntPtr.Zero)
+            {
+                Native.UnhookWindowsHookEx(_hookId);
+                _hookId = IntPtr.Zero;
+            }
+        }
+
+        public void Dispose()
+        {
+            Uninstall();
+        }
+
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                bool enabled, mute;
+                int step;
+                lock (_sync)
+                {
+                    enabled = this.Enabled;
+                    step = this.StepPercent;
+                    mute = this.MiddleMuteEnabled;
+                }
+                if (enabled)
+                {
+                    int msg = wParam.ToInt32();
+                    Native.MSLLHOOKSTRUCT data =
+                        (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.MSLLHOOKSTRUCT));
+                    if (msg == Native.WM_MOUSEWHEEL)
+                    {
+                        if (IsOverTaskbar(data.pt))
+                        {
+                            short raw = (short)((data.mouseData >> 16) & 0xFFFF);
+                            if (raw != 0)
+                            {
+                                int dir = raw > 0 ? 1 : -1;
+                                // 统一走 COM 精确调整（任何幅度都生效），再用自绘 OSD 浮窗显示结果
+                                float next = AudioVolume.ChangeBy(dir * step);
+                                if (next >= 0f)
+                                {
+                                    int pct = (int)Math.Round(next * 100f);
+                                    bool muted = AudioVolume.IsMuted();
+                                    Action<int, bool> h = OnVolumeChanged;
+                                    if (h != null) h(pct, muted);
+                                }
+                            }
+                            return (IntPtr)1;   // 吞掉滚轮，避免影响系统/任务栏
+                        }
+                    }
+                    else if (msg == Native.WM_MBUTTONDOWN && mute)
+                    {
+                        if (IsOverTaskbar(data.pt))
+                        {
+                            // 切静音（统一走 COM，保证音量/静音状态同步），再触发 OSD
+                            AudioVolume.ToggleMute();
+                            float cur = AudioVolume.GetScalar();
+                            int pct = cur < 0 ? 0 : (int)Math.Round(cur * 100f);
+                            bool muted = AudioVolume.IsMuted();
+                            Action<int, bool> h = OnVolumeChanged;
+                            if (h != null) h(pct, muted);
+                            return (IntPtr)1;   // 吞掉中键
+                        }
+                    }
+                }
+            }
+            return Native.CallNextHookEx(_hookId, nCode, wParam, lParam);
+        }
+
+        /* 注入多媒体音量键：VK_VOLUME_UP=0xAF / VK_VOLUME_DOWN=0xAE；都带 E0 扩展位 */
+        private static void InjectMediaKey(uint vk)
+        {
+            ushort scan = 0;
+            bool extended = true;
+            switch (vk)
+            {
+                case 0xAF: scan = 0x30; break;  // VolumeUp   E0 30
+                case 0xAE: scan = 0x2E; break;  // VolumeDown E0 2E
+                case 0xAD: scan = 0x20; break;  // VolumeMute E0 20
+            }
+            Native.INPUT down = new Native.INPUT();
+            down.type = Native.INPUT_KEYBOARD;
+            down.U.ki.wVk = (ushort)vk;
+            if (scan != 0)
+            {
+                down.U.ki.wScan = scan;
+                down.U.ki.dwFlags |= Native.KEYEVENTF_SCANCODE;
+            }
+            if (extended) down.U.ki.dwFlags |= Native.KEYEVENTF_EXTENDEDKEY;
+
+            Native.INPUT up = new Native.INPUT();
+            up.type = Native.INPUT_KEYBOARD;
+            up.U.ki.wVk = (ushort)vk;
+            if (scan != 0)
+            {
+                up.U.ki.wScan = scan;
+                up.U.ki.dwFlags |= Native.KEYEVENTF_SCANCODE;
+            }
+            if (extended) up.U.ki.dwFlags |= Native.KEYEVENTF_EXTENDEDKEY;
+            up.U.ki.dwFlags |= Native.KEYEVENTF_KEYUP;
+
+            Native.INPUT[] arr = new Native.INPUT[] { down, up };
+            Native.SendInput(2, arr, Marshal.SizeOf(typeof(Native.INPUT)));
+        }
+
+        /* 判定点是否在任务栏（含主+副显示器任务栏）上；任务栏位置缓存 300ms */
+        private bool IsOverTaskbar(Native.POINT pt)
+        {
+            lock (_sync)
+            {
+                uint now = Native.GetTickCount();
+                if (_trayRects.Count == 0 || (now - _rectStamp) > CacheRectsMs)
+                {
+                    RefreshTrayRects();
+                    _rectStamp = now;
+                }
+                foreach (Native.RECT r in _trayRects)
+                {
+                    if (pt.X >= r.Left && pt.X <= r.Right && pt.Y >= r.Top && pt.Y <= r.Bottom)
+                        return true;
+                }
+                return false;
+            }
+        }
+
+        private void RefreshTrayRects()
+        {
+            _trayRects.Clear();
+            try { Native.EnumWindows(_enumProc, IntPtr.Zero); } catch { }
+        }
+
+        private bool EnumWindowsCallback(IntPtr hWnd, IntPtr lParam)
+        {
+            try
+            {
+                StringBuilder cls = new StringBuilder(64);
+                Native.GetClassName(hWnd, cls, cls.Capacity);
+                string c = cls.ToString();
+                if (c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd")
+                {
+                    Native.RECT r;
+                    if (Native.GetWindowRect(hWnd, out r))
+                    {
+                        int w = r.Right - r.Left;
+                        int h = r.Bottom - r.Top;
+                        if (w > 0 && h > 0) _trayRects.Add(r);
+                    }
+                }
+            }
+            catch { }
+            return true;   // 继续枚举
         }
     }
 
@@ -1604,8 +2107,13 @@ namespace KeyMapper
     {
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValueName = "KeyMapper";
+        private const string SettingsKey = @"Software\KeyMapper";
+        private const string TV_Enabled = "TaskbarVolume";
+        private const string TV_Step = "TaskbarVolumeStep";
+        private const string TV_Mute = "TaskbarVolumeMute";
 
         private readonly KeyboardHook _hook = new KeyboardHook();
+        private readonly TaskbarVolumeFeature _taskVolume = new TaskbarVolumeFeature();
         private readonly List<KeyMapping> _mappings = new List<KeyMapping>();
         private readonly string _configPath;
         private readonly bool _startMin;
@@ -1619,6 +2127,11 @@ namespace KeyMapper
         private TestForm _testForm;
         private bool _enabled = true;
         private bool _trayHintShown;
+        private CheckBox _chkTaskVol;
+        private NumericUpDown _nudStep;
+        private CheckBox _chkMute;
+        private Label _lblCurrent;          // 主窗底部显示当前音量百分比/静音状态
+        private bool _loadingSettings;
 
         public MainForm(bool startMin)
         {
@@ -1631,6 +2144,8 @@ namespace KeyMapper
             BuildTray();
             LoadMappings();
             _chkStartup.Checked = IsAutoStart();
+            LoadTaskVolumeSettings();
+            _taskVolume.OnVolumeChanged += OnTaskVolumeChanged;
             UpdateStatus();
 
             // 关键：把钩子收到的按键转发给按键测试窗口
@@ -1751,15 +2266,65 @@ namespace KeyMapper
             btnTable.Controls.Add(flowManage, 0, 0);
             btnTable.Controls.Add(flowTools, 1, 0);
 
+            // 底部一行：开机自启 + 任务栏滚轮音量控制（同一行顺排）
             FlowLayoutPanel optFlow = new FlowLayoutPanel();
             optFlow.Dock = DockStyle.Fill;
             optFlow.Padding = new Padding(0, 8, 0, 0);
+            optFlow.Margin = new Padding(0);
+            optFlow.WrapContents = false;
 
             _chkStartup = new CheckBox();
             _chkStartup.Text = "开机自动启动（随系统启动，后台运行）";
             _chkStartup.AutoSize = true;
             _chkStartup.CheckedChanged += delegate { SetAutoStart(_chkStartup.Checked); };
             optFlow.Controls.Add(_chkStartup);
+
+            _chkTaskVol = new CheckBox();
+            _chkTaskVol.Text = "任务栏滚轮调音量";
+            _chkTaskVol.AutoSize = true;
+            _chkTaskVol.Margin = new Padding(16, 3, 0, 0);
+            _chkTaskVol.CheckedChanged += delegate { ApplyTaskVolumeToFeature(); };
+            optFlow.Controls.Add(_chkTaskVol);
+
+            Label lblStep = new Label();
+            lblStep.Text = "幅度";
+            lblStep.AutoSize = true;
+            lblStep.TextAlign = ContentAlignment.MiddleLeft;
+            lblStep.Margin = new Padding(6, 6, 0, 0);
+            optFlow.Controls.Add(lblStep);
+
+            _nudStep = new NumericUpDown();
+            _nudStep.Minimum = 1;
+            _nudStep.Maximum = 20;
+            _nudStep.Value = 2;
+            _nudStep.Increment = 1;
+            _nudStep.DecimalPlaces = 0;
+            _nudStep.Width = 50;
+            _nudStep.TextAlign = HorizontalAlignment.Center;
+            _nudStep.Margin = new Padding(2, 3, 0, 0);
+            _nudStep.ValueChanged += delegate { ApplyTaskVolumeToFeature(); };
+            optFlow.Controls.Add(_nudStep);
+
+            Label lblPct = new Label();
+            lblPct.Text = "% / 格";
+            lblPct.AutoSize = true;
+            lblPct.TextAlign = ContentAlignment.MiddleLeft;
+            lblPct.Margin = new Padding(2, 6, 0, 0);
+            optFlow.Controls.Add(lblPct);
+
+            _chkMute = new CheckBox();
+            _chkMute.Text = "中键静音";
+            _chkMute.AutoSize = true;
+            _chkMute.Margin = new Padding(14, 3, 0, 0);
+            _chkMute.CheckedChanged += delegate { ApplyTaskVolumeToFeature(); };
+            optFlow.Controls.Add(_chkMute);
+
+            _lblCurrent = new Label();
+            _lblCurrent.Text = "当前音量: —";
+            _lblCurrent.AutoSize = true;
+            _lblCurrent.Margin = new Padding(12, 6, 0, 0);
+            _lblCurrent.ForeColor = Color.DimGray;
+            optFlow.Controls.Add(_lblCurrent);
 
             _lblStatus = new Label();
             _lblStatus.Dock = DockStyle.Fill;
@@ -1884,6 +2449,91 @@ namespace KeyMapper
                 MessageBox.Show(this, "设置开机自启失败：" + ex.Message, "提示");
             }
             UpdateStatus();
+        }
+
+        /* ---------- 任务栏滚轮音量：设置 ---------- */
+        private void LoadTaskVolumeSettings()
+        {
+            _loadingSettings = true;
+            try
+            {
+                bool enabled = false;
+                int step = 2;
+                bool mute = true;
+                try
+                {
+                    using (RegistryKey k = Registry.CurrentUser.OpenSubKey(SettingsKey, false))
+                    {
+                        if (k != null)
+                        {
+                            object v;
+                            v = k.GetValue(TV_Enabled);
+                            if (v != null) bool.TryParse(v.ToString(), out enabled);
+                            v = k.GetValue(TV_Step);
+                            if (v != null)
+                            {
+                                int n;
+                                if (int.TryParse(v.ToString(), out n))
+                                {
+                                    if (n < 1) n = 1;
+                                    if (n > 20) n = 20;
+                                    step = n;
+                                }
+                            }
+                            v = k.GetValue(TV_Mute);
+                            if (v != null) bool.TryParse(v.ToString(), out mute);
+                        }
+                    }
+                }
+                catch { }
+
+                _chkTaskVol.Checked = enabled;
+                _nudStep.Value = step;
+                _chkMute.Checked = mute;
+                UpdateTaskVolumeChildrenEnabled();
+
+                _taskVolume.Enabled = enabled;
+                _taskVolume.StepPercent = step;
+                _taskVolume.MiddleMuteEnabled = mute;
+            }
+            finally
+            {
+                _loadingSettings = false;
+            }
+        }
+
+        private void SaveTaskVolumeSettings()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                {
+                    if (k == null) return;
+                    k.SetValue(TV_Enabled, _chkTaskVol.Checked);
+                    k.SetValue(TV_Step, (int)_nudStep.Value);
+                    k.SetValue(TV_Mute, _chkMute.Checked);
+                }
+            }
+            catch { }
+        }
+
+        /* 控件变化 → 写入 feature + 注册表 + 联动子项灰显 */
+        private void ApplyTaskVolumeToFeature()
+        {
+            if (_loadingSettings) return;
+            _taskVolume.Enabled = _chkTaskVol.Checked;
+            _taskVolume.StepPercent = (int)_nudStep.Value;
+            _taskVolume.MiddleMuteEnabled = _chkMute.Checked;
+            UpdateTaskVolumeChildrenEnabled();
+            SaveTaskVolumeSettings();
+            UpdateStatus();
+        }
+
+        private void UpdateTaskVolumeChildrenEnabled()
+        {
+            bool on = _chkTaskVol.Checked;
+            _nudStep.Enabled = on;
+            _chkMute.Enabled = on;
         }
 
         /* ---------- 配置读写 ---------- */
@@ -2017,8 +2667,50 @@ namespace KeyMapper
             string extra = "";
             if (_hook.InjectFailures > 0)
                 extra = " ｜ 注入失败 " + _hook.InjectFailures + " 次（若映射无效，请解锁屏幕或托盘菜单【以管理员身份重启】）";
+            string tv = _taskVolume.Enabled
+                ? " ｜ 任务栏滚轮调音量:开(" + _taskVolume.StepPercent + "%/格)"
+                : "";
             _lblStatus.Text = "共 " + _mappings.Count + " 条映射 ｜ " +
-                (_enabled ? "已启用（映射生效中）" : "已停用（按键恢复原功能）") + extra;
+                (_enabled ? "已启用（映射生效中）" : "已停用（按键恢复原功能）") + tv + extra;
+        }
+
+        /* ---------- 任务栏音量变化（COM 设置后触发） ---------- */
+        private void OnTaskVolumeChanged(int percent, bool muted)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((Action)delegate { OnTaskVolumeChanged(percent, muted); });
+                return;
+            }
+            UpdateCurrentVolumeLabel(percent, muted);
+            OsdOverlay.Show(percent, muted);
+        }
+
+        private void UpdateCurrentVolumeLabel(int pct, bool muted)
+        {
+            if (_lblCurrent == null) return;
+            if (pct < 0)
+            {
+                _lblCurrent.Text = "当前音量: —";
+                _lblCurrent.ForeColor = Color.Gray;
+            }
+            else
+            {
+                _lblCurrent.Text = "当前音量: " + (muted ? "静音" : pct + "%");
+                _lblCurrent.ForeColor = muted ? Color.Gray : Color.Black;
+            }
+        }
+
+        private void RefreshCurrentVolume()
+        {
+            try
+            {
+                float v = AudioVolume.GetScalar();
+                int pct = v < 0 ? -1 : (int)Math.Round(v * 100f);
+                bool muted = AudioVolume.IsMuted();
+                UpdateCurrentVolumeLabel(pct, muted);
+            }
+            catch { }
         }
 
         /* ---------- 按键测试 / 注入自检 ---------- */
@@ -2076,6 +2768,18 @@ namespace KeyMapper
                 MessageBox.Show(this, ex.Message + "\r\n按键映射功能不可用。", "按键映射助手",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+
+            try
+            {
+                _taskVolume.Install();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message + "\r\n任务栏滚轮调音量功能不可用。", "按键映射助手",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+
+            RefreshCurrentVolume();
 
             if (_startMin)
             {
@@ -2245,6 +2949,7 @@ namespace KeyMapper
 
             SaveMappings();
             if (_testForm != null && !_testForm.IsDisposed) _testForm.Close();
+            _taskVolume.Dispose();
             _hook.Dispose();
             if (_tray != null) _tray.Dispose();
             base.OnFormClosing(e);
@@ -2275,4 +2980,5 @@ namespace KeyMapper
             }
         }
     }
+}
 }
