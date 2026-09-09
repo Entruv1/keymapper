@@ -5,6 +5,8 @@ on:
     branches: [ main, master ]
     tags: [ 'v*' ]
   pull_request:
+  # 手动触发：Actions 页面点 Run workflow 即可重新构建（不发布）
+  workflow_dispatch:
 
 jobs:
   build:
@@ -71,4 +73,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*.zip
+          name: KeyMapper ${{ github.ref_name }}
+          body: |
+            自动构建产物（tag: ${{ github.ref_name }}）
+            - KeyMapper.exe（.NET Framework 绿色版，Win7+ 免运行时）
+            - 源码 / 图标 / build.bat / 中文说明
           generate_release_notes: true
