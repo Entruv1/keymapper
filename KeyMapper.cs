@@ -149,6 +149,11 @@ namespace KeyMapper
         public const int WH_MOUSE_LL = 14;
         public const int WM_MOUSEWHEEL = 0x020A;
         public const int WM_MBUTTONDOWN = 0x0207;
+        public const uint WM_APP = 0x8000;
+        public const uint WM_APP_TASKBAR_VOLUME = WM_APP + 1;   // 主窗体自定义消息：任务栏滚轮音量请求
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
@@ -807,10 +812,20 @@ namespace KeyMapper
 
         public static void ToggleMute()
         {
-            SetMute(!IsMuted());
+            IAudioEndpointVolume v = GetEndpoint();
+            if (v == null) return;
+            try
+            {
+                bool m;
+                v.GetMute(out m);
+                Guid g = Guid.Empty;
+                v.SetMute(!m, ref g);
+            }
+            catch { }
         }
 
-        /* 在当前基础上增加 deltaPercent 个百分点（可负），自动取消静音。返回调整后的标量值，失败返回 -1 */
+        /* 在当前基础上增加 deltaPercent 个百分点（可负），自动取消静音。返回调整后的标量值，失败返回 -1。
+           单次调用只获取一次端点（原实现内部再查一次 IsMuted，每次重建端点且设备切换瞬间两次查询可能不一致） */
         public static float ChangeBy(int deltaPercent)
         {
             IAudioEndpointVolume v = GetEndpoint();
@@ -819,10 +834,15 @@ namespace KeyMapper
             {
                 float cur;
                 v.GetMasterVolumeLevelScalar(out cur);
-                if (deltaPercent > 0 && IsMuted())
+                if (deltaPercent > 0)
                 {
-                    Guid g = Guid.Empty;
-                    v.SetMute(false, ref g);
+                    bool m;
+                    v.GetMute(out m);
+                    if (m)
+                    {
+                        Guid g = Guid.Empty;
+                        v.SetMute(false, ref g);
+                    }
                 }
                 float next = cur + deltaPercent / 100f;
                 if (next < 0f) next = 0f;
@@ -947,12 +967,12 @@ namespace KeyMapper
         private IntPtr _hookId = IntPtr.Zero;
         private readonly object _sync = new object();
         private readonly List<Native.RECT> _trayRects = new List<Native.RECT>();
-        private uint _rectStamp;
         private readonly Native.EnumWindowsProc _enumProc;   // 必须持引用，避免被 GC
 
         public bool Enabled = false;
         public int StepPercent = 2;            // 单次滚动调整的百分比，1~20
         public bool MiddleMuteEnabled = true;  // 中键切换静音
+        public IntPtr DispatcherHandle = IntPtr.Zero;   // 主窗体句柄：钩子回调仅投递消息，由主窗体消息泵执行音量调节
 
         public event Action<int, bool> OnVolumeChanged;   // (音量%, 是否静音) 调整后触发
 
@@ -1004,13 +1024,15 @@ namespace KeyMapper
             {
                 bool enabled, mute;
                 int step;
+                IntPtr target;
                 lock (_sync)
                 {
                     enabled = this.Enabled;
                     step = this.StepPercent;
                     mute = this.MiddleMuteEnabled;
+                    target = this.DispatcherHandle;
                 }
-                if (enabled)
+                if (enabled && target != IntPtr.Zero)
                 {
                     int msg = wParam.ToInt32();
                     Native.MSLLHOOKSTRUCT data =
@@ -1023,15 +1045,9 @@ namespace KeyMapper
                             if (raw != 0)
                             {
                                 int dir = raw > 0 ? 1 : -1;
-                                // 统一走 COM 精确调整（任何幅度都生效），再用自绘 OSD 浮窗显示结果
-                                float next = AudioVolume.ChangeBy(dir * step);
-                                if (next >= 0f)
-                                {
-                                    int pct = (int)Math.Round(next * 100f);
-                                    bool muted = AudioVolume.IsMuted();
-                                    Action<int, bool> h = OnVolumeChanged;
-                                    if (h != null) h(pct, muted);
-                                }
+                                // 只投递请求，实际音量调节在主窗体消息泵中执行：
+                                // 低级钩子回调必须快速返回，否则 Windows 超时会静默卸载钩子（功能随之失效）
+                                Native.PostMessage(target, Native.WM_APP_TASKBAR_VOLUME, (IntPtr)(dir * step), IntPtr.Zero);
                             }
                             return (IntPtr)1;   // 吞掉滚轮，避免影响系统/任务栏
                         }
@@ -1040,19 +1056,44 @@ namespace KeyMapper
                     {
                         if (IsOverTaskbar(data.pt))
                         {
-                            // 切静音（统一走 COM，保证音量/静音状态同步），再触发 OSD
-                            AudioVolume.ToggleMute();
-                            float cur = AudioVolume.GetScalar();
-                            int pct = cur < 0 ? 0 : (int)Math.Round(cur * 100f);
-                            bool muted = AudioVolume.IsMuted();
-                            Action<int, bool> h = OnVolumeChanged;
-                            if (h != null) h(pct, muted);
+                            Native.PostMessage(target, Native.WM_APP_TASKBAR_VOLUME, IntPtr.Zero, IntPtr.Zero);
                             return (IntPtr)1;   // 吞掉中键
                         }
                     }
                 }
             }
             return Native.CallNextHookEx(_hookId, nCode, wParam, lParam);
+        }
+
+        /* 主窗体消息泵（WndProc）回调：执行实际音量调节并触发 OSD 显示。
+           param==0 → 切换静音；否则为滚动调整量（可正可负） */
+        public void HandleQueuedVolumeRequest(int param)
+        {
+            if (!Enabled) return;
+            try
+            {
+                if (param == 0)
+                {
+                    AudioVolume.ToggleMute();
+                    float cur = AudioVolume.GetScalar();
+                    int pct = cur < 0 ? 0 : (int)Math.Round(cur * 100f);
+                    bool muted = AudioVolume.IsMuted();
+                    Action<int, bool> h = OnVolumeChanged;
+                    if (h != null) h(pct, muted);
+                }
+                else
+                {
+                    float next = AudioVolume.ChangeBy(param);
+                    if (next >= 0f)
+                    {
+                        int pct = (int)Math.Round(next * 100f);
+                        bool muted = AudioVolume.IsMuted();
+                        Action<int, bool> h = OnVolumeChanged;
+                        if (h != null) h(pct, muted);
+                    }
+                }
+            }
+            catch { }
         }
 
         /* 注入多媒体音量键：VK_VOLUME_UP=0xAF / VK_VOLUME_DOWN=0xAE；都带 E0 扩展位 */
@@ -1091,17 +1132,14 @@ namespace KeyMapper
             Native.SendInput(2, arr, Marshal.SizeOf(typeof(Native.INPUT)));
         }
 
-        /* 判定点是否在任务栏（含主+副显示器任务栏）上；任务栏位置缓存 300ms */
+        /* 判定点是否在任务栏（含主+副显示器任务栏）上。
+           只读缓存、不做枚举刷新：钩子回调必须快速返回，枚举由主窗体定时器在消息泵中执行，
+           否则回调内 EnumWindows/COM 一旦变慢，Windows 会按低级钩子超时策略静默卸载钩子，导致滚轮音量永久失效。 */
         private bool IsOverTaskbar(Native.POINT pt)
         {
             lock (_sync)
             {
-                uint now = Native.GetTickCount();
-                if (_trayRects.Count == 0 || (now - _rectStamp) > CacheRectsMs)
-                {
-                    RefreshTrayRects();
-                    _rectStamp = now;
-                }
+                if (_trayRects.Count == 0) return false;
                 foreach (Native.RECT r in _trayRects)
                 {
                     if (pt.X >= r.Left && pt.X <= r.Right && pt.Y >= r.Top && pt.Y <= r.Bottom)
@@ -1111,10 +1149,31 @@ namespace KeyMapper
             }
         }
 
-        private void RefreshTrayRects()
+        /* 主窗体定时器驱动：按需刷新任务栏矩形缓存（带节流），避免在钩子回调中枚举窗口 */
+        private uint _lastRefreshTick;
+        public void RefreshTrayRectsIfNeeded()
         {
-            _trayRects.Clear();
-            try { Native.EnumWindows(_enumProc, IntPtr.Zero); } catch { }
+            lock (_sync)
+            {
+                uint now = Native.GetTickCount();
+                if (_trayRects.Count == 0 || (now - _lastRefreshTick) > CacheRectsMs)
+                {
+                    _lastRefreshTick = now;
+                    _trayRects.Clear();   // 先清空再枚举，防止矩形无限累积（原实现缺 Clear 导致每 2 秒重复添加）
+                    try { Native.EnumWindows(_enumProc, IntPtr.Zero); } catch { }
+                }
+            }
+        }
+
+        /* 防御：Windows 在低级钩子回调超时后可能静默卸载钩子且无任何通知；
+           主窗体定时器低频调用本方法重装，保证功能长期存活（先卸载再安装，避免重复钩子） */
+        public void EnsureHookAlive()
+        {
+            if (!Enabled) return;
+            IntPtr h;
+            lock (_sync) { h = _hookId; }
+            if (h == IntPtr.Zero) return;
+            try { Uninstall(); Install(); } catch { }
         }
 
         private bool EnumWindowsCallback(IntPtr hWnd, IntPtr lParam)
@@ -2136,6 +2195,8 @@ namespace KeyMapper
         private CheckBox _chkMute;
         private Label _lblCurrent;          // 主窗底部显示当前音量百分比/静音状态
         private bool _loadingSettings;
+        private System.Windows.Forms.Timer _taskVolTimer;   // 任务栏滚轮音量：任务栏矩形刷新 + 钩子健康兜底
+        private int _taskVolTickCount;
 
         public MainForm(bool startMin)
         {
@@ -2775,6 +2836,7 @@ namespace KeyMapper
 
             try
             {
+                _taskVolume.DispatcherHandle = this.Handle;
                 _taskVolume.Install();
             }
             catch (Exception ex)
@@ -2782,6 +2844,25 @@ namespace KeyMapper
                 MessageBox.Show(this, ex.Message + "\r\n任务栏滚轮调音量功能不可用。", "按键映射助手",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+
+            /* 定时器：2 秒刷新任务栏矩形（不阻塞钩子回调）；每 30 秒重装一次鼠标钩子，防御系统静默卸载 */
+            if (_taskVolTimer == null)
+            {
+                _taskVolTimer = new System.Windows.Forms.Timer();
+                _taskVolTimer.Interval = 2000;
+                _taskVolTimer.Tick += delegate
+                {
+                    if (!_taskVolume.Enabled) return;
+                    _taskVolume.RefreshTrayRectsIfNeeded();
+                    if (++_taskVolTickCount >= 15)
+                    {
+                        _taskVolTickCount = 0;
+                        _taskVolume.EnsureHookAlive();
+                    }
+                };
+            }
+            _taskVolTimer.Start();
+            _taskVolume.RefreshTrayRectsIfNeeded();   // 启动立即填充任务栏矩形，避免滚动时缓存为空
 
             RefreshCurrentVolume();
 
@@ -2796,6 +2877,18 @@ namespace KeyMapper
                     _trayHintShown = true;
                 }
             }
+        }
+
+        /* 处理任务栏滚轮音量请求：钩子回调只负责 PostMessage 投递，实际音量调节在这里（主线程消息泵）执行，
+           避免低级钩子回调中做 COM/枚举等重活导致系统超时静默卸载钩子 */
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == (int)Native.WM_APP_TASKBAR_VOLUME)
+            {
+                _taskVolume.HandleQueuedVolumeRequest(m.WParam.ToInt32());
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         protected override void OnResize(EventArgs e)
@@ -2953,6 +3046,7 @@ namespace KeyMapper
 
             SaveMappings();
             if (_testForm != null && !_testForm.IsDisposed) _testForm.Close();
+            if (_taskVolTimer != null) _taskVolTimer.Stop();
             _taskVolume.Dispose();
             _hook.Dispose();
             if (_tray != null) _tray.Dispose();
