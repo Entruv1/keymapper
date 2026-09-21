@@ -728,29 +728,33 @@ namespace KeyMapper
             [PreserveSig] int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
         }
 
-        private static IAudioEndpointVolume _endpoint;
-        private static readonly object _lock = new object();
-
-        /* 获取主音频端点（首次创建后缓存，避免每次调用都做 COM 构造） */
+        /* 获取当前激活的默认音频端点：每次重新查询，不缓存。
+           用户切换声音输出设备（耳机/音箱/蓝牙/HDMI 等）后，Windows 会更新默认端点；
+           若继续使用旧缓存的 COM 对象，音量读写会一直作用在已失效的旧设备上，表现为调节失效。
+           每次重建的 COM 开销为微秒级，远低于滚轮/按键的触发频率，无需担心性能。 */
         private static IAudioEndpointVolume GetEndpoint()
         {
-            lock (_lock)
+            try
             {
-                if (_endpoint != null) return _endpoint;
+                IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IntPtr dev;
+                if (e.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return null;
+                IntPtr pv = IntPtr.Zero;
                 try
                 {
-                    IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
-                    IntPtr dev;
-                    if (e.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return null;
                     Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
-                    IntPtr pv;
                     IMMDevice d = (IMMDevice)Marshal.GetObjectForIUnknown(dev);
                     if (d.Activate(ref iid, 1, IntPtr.Zero, out pv) != 0) return null;
-                    _endpoint = (IAudioEndpointVolume)Marshal.GetObjectForIUnknown(pv);
-                    return _endpoint;
+                    return (IAudioEndpointVolume)Marshal.GetObjectForIUnknown(pv);
                 }
-                catch { return null; }
+                finally
+                {
+                    /* GetObjectForIUnknown 已自持引用，这里释放 API 调用返回的裸指针引用，避免 COM 泄漏 */
+                    Marshal.Release(dev);
+                    if (pv != IntPtr.Zero) Marshal.Release(pv);
+                }
             }
+            catch { return null; }
         }
 
         /* 0.0 ~ 1.0，失败返回 -1 */
