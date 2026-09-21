@@ -1020,6 +1020,7 @@ namespace KeyMapper
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            _lastCbTick = Native.GetTickCount();   // 心跳：每次鼠标消息都证明钩子活着
             if (nCode >= 0)
             {
                 bool enabled, mute;
@@ -1151,6 +1152,7 @@ namespace KeyMapper
 
         /* 主窗体定时器驱动：按需刷新任务栏矩形缓存（带节流），避免在钩子回调中枚举窗口 */
         private uint _lastRefreshTick;
+        private uint _lastCbTick;   // 钩子心跳：每次鼠标回调更新，用于检测钩子是否被系统静默卸载
         public void RefreshTrayRectsIfNeeded()
         {
             lock (_sync)
@@ -1165,15 +1167,24 @@ namespace KeyMapper
             }
         }
 
-        /* 防御：Windows 在低级钩子回调超时后可能静默卸载钩子且无任何通知；
-           主窗体定时器低频调用本方法重装，保证功能长期存活（先卸载再安装，避免重复钩子） */
+        /* 钩子存活检测：与键盘钩子一样默认常驻不折腾（键盘钩子从不重装却一直稳定）；
+           鼠标一直在动，低级鼠标钩子应持续回调。若连续 20 秒无任何回调，说明钩子被系统静默卸载，才重装自愈。
+           这样去掉了"每 30 秒盲重装"引入的空窗与重装失败风险。 */
         public void EnsureHookAlive()
         {
             if (!Enabled) return;
             IntPtr h;
             lock (_sync) { h = _hookId; }
-            if (h == IntPtr.Zero) return;
-            try { Uninstall(); Install(); } catch { }
+            if (h == IntPtr.Zero)
+            {
+                try { Install(); _lastCbTick = Native.GetTickCount(); } catch { }
+                return;
+            }
+            uint now = Native.GetTickCount();
+            if (now - _lastCbTick > 20000)
+            {
+                try { Uninstall(); Install(); _lastCbTick = now; } catch { }
+            }
         }
 
         private bool EnumWindowsCallback(IntPtr hWnd, IntPtr lParam)
@@ -2213,6 +2224,12 @@ namespace KeyMapper
             _taskVolume.OnVolumeChanged += OnTaskVolumeChanged;
             UpdateStatus();
 
+            // 窗口句柄可能因 ShowInTaskbar 改变等被 WinForms 重建（最小化到托盘时触发）；
+            // 句柄一旦重建，OnShown 里缓存的 DispatcherHandle 就成了已销毁的旧句柄，
+            // PostMessage 到旧句柄静默失败 -> 任务栏滚轮调音量在最小化托盘后失灵（再最大化也不恢复的根因）。
+            // 每次句柄创建/重建都同步更新投递目标句柄。
+            this.HandleCreated += delegate { if (_taskVolume != null) _taskVolume.DispatcherHandle = this.Handle; };
+
             // 关键：把钩子收到的按键转发给按键测试窗口
             _hook.KeyEvent += OnKeyEvent;
         }
@@ -2854,11 +2871,7 @@ namespace KeyMapper
                 {
                     if (!_taskVolume.Enabled) return;
                     _taskVolume.RefreshTrayRectsIfNeeded();
-                    if (++_taskVolTickCount >= 15)
-                    {
-                        _taskVolTickCount = 0;
-                        _taskVolume.EnsureHookAlive();
-                    }
+                    _taskVolume.EnsureHookAlive();   // 心跳检测：钩子活着就不折腾，真死了才自愈
                 };
             }
             _taskVolTimer.Start();
