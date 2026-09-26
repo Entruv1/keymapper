@@ -173,6 +173,12 @@ namespace KeyMapper
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForSystem();
     }
 
     /* ==================== 键名显示 ==================== */
@@ -1201,7 +1207,28 @@ namespace KeyMapper
                     {
                         int w = r.Right - r.Left;
                         int h = r.Bottom - r.Top;
-                        if (w > 0 && h > 0) _trayRects.Add(r);
+                        if (w > 0 && h > 0)
+                        {
+                            /* 多显示器混合 DPI（如主屏125% + 副屏100%）：
+                               本程序为 System-DPI-Aware，GetWindowRect 返回的是按系统 DPI 虚拟化后的坐标
+                               （副屏会放大 systemDpi/monDpi 倍）；而低级鼠标钩子回调的坐标是物理像素。
+                               两者在副屏上错位，导致副屏任务栏矩形永远命中不了（主屏 1:1 不受影响）。
+                               这里按任务栏所在显示器的 DPI 换算回物理坐标：physical = virtual * monDpi / systemDpi。
+                               换算结果与 DPI-unaware 进程（96 基准）看到的物理矩形一致，可直接与钩子 pt 比较。 */
+                            uint sysDpi = Native.GetDpiForSystem();
+                            uint monDpi = Native.GetDpiForWindow(hWnd);
+                            if (sysDpi > 0 && monDpi > 0 && monDpi != sysDpi)
+                            {
+                                double k = (double)monDpi / sysDpi;
+                                Native.RECT phys = new Native.RECT();
+                                phys.Left = (int)Math.Floor(r.Left * k);
+                                phys.Top = (int)Math.Floor(r.Top * k);
+                                phys.Right = (int)Math.Ceiling(r.Right * k);
+                                phys.Bottom = (int)Math.Ceiling(r.Bottom * k);
+                                r = phys;
+                            }
+                            _trayRects.Add(r);
+                        }
                     }
                 }
             }
